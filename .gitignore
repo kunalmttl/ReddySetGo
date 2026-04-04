@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+.venv/
+venv/
+
+# Telethon session files
+*.session
+*.session-journal
+
+# Environment & secrets
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data exports (optional - uncomment if you don't want to track these)
+# channel_history_1y.jsonl
+# matches.csv
+# anomalies.csv
