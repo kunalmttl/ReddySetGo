@@ -1,8 +1,8 @@
 # project_state.md — reddy_set_go
 
-## Current State: ✅ Operational (Live Monitoring Active)
+## Current State: ✅ Operational (Live Monitoring + Auto-Betting Active)
 
-All scripts functional. Live listener (`tg_listener.py`) actively monitors **satta automation** channel. Offline analysis complete with 225 match records in `matches.csv`.
+All scripts functional. Live listener (`live_monitor.py`) monitors **satta automation** channel and automatically places bets on Reddybook via Playwright. Offline analysis complete with 225 match records in `matches.csv`.
 
 ---
 
@@ -10,18 +10,21 @@ All scripts functional. Live listener (`tg_listener.py`) actively monitors **sat
 
 | File | Lines | Purpose | Status |
 |------|-------|---------|--------|
+| `live_monitor.py` | 195 | Live Telegram listener + Reddybook auto-betting orchestrator | ✅ Working |
+| `bet_action.py` | 408 | Playwright browser automation (login, find match, place bet, cashout, loss cut) | ✅ Working |
+| `state.py` | 76 | Match state tracker + stake calculator (5% limit, 40/60 split) | ✅ Working |
 | `history_replay.py` | 326 | Offline replay engine — iterates past messages, parses & tracks match lifecycle | ✅ Working |
-| `tg_listener.py` | 240 | Live real-time listener — event-driven state machine, logs every message | ✅ Working |
+| `tg_listener.py` | 240 | Live real-time listener — event-driven state machine, logs every message (no betting) | ✅ Working |
 | `parser.py` | 271 | Message classifier — identifies 12 message types, extracts teams/odds | ✅ Working |
-| `config.py` | 21 | Env-based config loader (reads `.env`, no hardcoded secrets) | ✅ Working |
+| `config.py` | 35 | Env-based config loader (reads `.env`, no hardcoded secrets) | ✅ Working |
 | `export_history.py` | 91 | One-time exporter — dumps channel history to JSONL | ✅ Used (3055 msgs) |
 | `new_test.py` | 18 | Telegram session login test | ✅ Working |
-| `.env` | 6 | Secrets & channel config (gitignored) | ✅ Configured |
+| `.env` | 16 | Secrets, channel config, site creds, risk params (gitignored) | ✅ Configured |
 | `.gitignore` | 17 | Protects `.session`, `.env`, `__pycache__`, `.venv` | ✅ Active |
 | `channel_history_1y.jsonl` | 3055 lines | Offline message backup (Feb 2025 – Feb 2026) | ✅ Complete |
 | `matches.csv` | 225 rows | Processed match results from offline analysis | ✅ Generated |
 | `anomalies.csv` | 1 line (header only) | Anomaly tracking — currently empty | ⚠️ Unused |
-| `context.md` | 169 lines | Project documentation | ✅ Updated |
+| `context.md` | 190 lines | Project documentation | ✅ Updated |
 
 ---
 
@@ -31,6 +34,16 @@ All scripts functional. Live listener (`tg_listener.py`) actively monitors **sat
 - **Channel ID**: `-1003898959289`
 - **Invite link**: `https://t.me/+CK-lEZsWXOZmMjY1`
 - **Previously tracked**: D COMPANY TIPS DUBAI 💰 (`-1001165742515`)
+
+---
+
+## Betting Site
+
+- **URL**: `https://reddybook.live`
+- **Login page**: `/home`
+- **Cricket page**: `/sports/4`
+- **Bet type**: Sportsbook (fixed odds, back bets)
+- **Odds format**: Channel `46p` → Decimal `1.46`
 
 ---
 
@@ -69,38 +82,52 @@ Date range: **2025-02-16 → 2026-02-05**
 
 ## Code Architecture
 
+### live_monitor.py — Orchestrator (Telegram + Playwright)
+- Starts Playwright browser → logs into Reddybook
+- Starts Telethon client → listens to channel
+- Routes signals to `BetAction` methods:
+  - `MATCH_SETUP` → fetch balance, calc stake, find match on site
+  - `FIRST ENTRY` → place back bet (40% of limit)
+  - `JACKPOT` → place second back bet (60% of limit)
+  - `CASHOUT` → click cashout, accept pre-filled amount
+  - `LOSS CUT` → click loss cut, accept pre-filled amount
+  - `WIN/LOSS/CANCEL` → close match state
+
+### bet_action.py — Playwright Browser Automation
+- **Login**: Navigates to `/home`, fills credentials, clicks submit
+- **Balance**: Reads balance from header
+- **Find match**: Goes to `/sports/4`, searches for team keywords
+- **Place bet**: Clicks BACK (blue) odds for predicted winner, enters stake, clicks "PLACE BET"
+- **Cashout/Loss Cut**: Clicks button, accepts pre-filled stake, clicks "PLACE BET"
+- **Retry logic**: Retries indefinitely on "odds changed", aborts if drift >15%
+- **Anti-detection**: Disables `navigator.webdriver`, custom user agent, `--no-sandbox`
+
+### state.py — Match State + Stake Calculator
+- **Match limit**: 5% of balance
+- **First entry**: 40% of limit
+- **Jackpot**: 60% of limit
+- **Stake rounding**: Nearest ₹100, minimum ₹100
+
 ### history_replay.py — Offline Replay Engine
-- **Date range**: `START_UTC` / `END_UTC` constants (currently set to IPL 2026: Mar 28 – Apr 4)
+- **Date range**: `START_UTC` / `END_UTC` constants
 - **`ASSUME_UNCLOSED_AS_LOSS = True`**: Unclosed matches counted as losses
 - **`MAX_ENTRIES_PER_MATCH = 2`**: Max 2 entry signals per match
-- **State machine**: `MatchState` dataclass tracks active match, entries count
-- **Odds extraction**: `extract_favorite_odds()` finds lowest `p` value (strongest favorite)
-- **Global counters**: `wins`, `explicit_match_losses`, `general_loss_posts`, `unclosed_matches`, `assumed_losses`, `ignored`
 
 ### parser.py — Message Classifier
 - **12 message types**: EMPTY, MATCH_SETUP, SIGNAL_WAIT, SIGNAL_LOSS_CUT, SIGNAL_CASHOUT_BOOK, WIN_POST, LOSS_POST, SIGNAL_FIRST_ENTRY, SIGNAL_JACKPOT_ENTRY, ODDS_UPDATE, OTHER, MATCH_CANCELLED
 - **Entry detection**: Requires odds (`NNp`) + strong CTA (KARO, KARLO, PLUS, etc.)
 - **Jackpot disambiguation**: Accepts "JACKPOT BANEGA/BANEGI" (future), rejects "JACKPOT BANA HAI" (recap)
-- **Loss negation**: "NO LOSS", "NO PROFIT" phrases prevent false loss detection
-- **Cancel detection**: "CALLED OFF", "ABANDONED", "MATCH NHI HOGA", etc.
 - **Line-by-line regex**: Preserves newlines for accurate team/winner extraction
 
-### tg_listener.py — Real-time Listener
-- **Event-driven**: Uses `@client.on(events.NewMessage)` handler
-- **Logs every message**: Shows msg ID, timestamp, parsed type, and action
-- **Deduplication**: `recent_ids` deque (maxlen=500) prevents double-processing
-- **Entry rules**: First entry #1 always allowed; #2 only if odds improved (fav p increased)
-- **State tracking**: `first_count`, `jackpot_done`, `first1_fav_p/team`
-- **Auto-join**: Attempts invite hash if configured
+### tg_listener.py — Real-time Listener (No Betting)
+- Event-driven: Uses `@client.on(events.NewMessage)` handler
+- Logs every message: Shows msg ID, timestamp, parsed type, and action
+- Deduplication: `recent_ids` deque (maxlen=500)
 
 ### config.py — Env-based Config
 - Reads `.env` file at import time
 - No hardcoded secrets — all values from environment
-- Supports `TARGET_CHAT_ID`, `TARGET_CHAT_USERNAME`, `TARGET_INVITE_HASH`
-
-### export_history.py — History Exporter
-- **One-time use**: Already ran, produced `channel_history_1y.jsonl`
-- **Fields exported**: chat_id, msg_id, date_utc, raw_text, is_reply, reply_to_msg_id, is_forward, forward_from, has_media, media_type, grouped_id, views, forwards, edit_date_utc, post_author, sender_id
+- Supports Telegram, Reddybook, and risk management settings
 
 ---
 
@@ -112,8 +139,12 @@ Date range: **2025-02-16 → 2026-02-05**
 | `API_HASH` | `04004...` | From my.telegram.org |
 | `SESSION_NAME` | `"tg2_session"` | Active session file exists |
 | `TARGET_CHAT_ID` | `-1003898959289` | satta automation |
-| `TARGET_CHAT_USERNAME` | _(empty)_ | Not used |
-| `TARGET_INVITE_HASH` | _(empty)_ | Already a member |
+| `SITE_URL` | `https://reddybook.live/home` | Betting site login page |
+| `HEADLESS` | `False` | Visible browser window |
+| `MATCH_LIMIT_PCT` | `5` | 5% of balance per match |
+| `FIRST_ENTRY_PCT` | `40` | 40% of limit for first entry |
+| `JACKPOT_PCT` | `60` | 60% of limit for jackpot |
+| `ODDS_DRIFT_ABORT` | `15` | Abort if odds drift >15% |
 
 ---
 
@@ -121,9 +152,10 @@ Date range: **2025-02-16 → 2026-02-05**
 
 - [ ] **`anomalies.csv` is empty** — header exists but no anomaly detection logic populates it
 - [ ] **`INNINGS_UPDATE` type not handled** — parser doesn't have a dedicated type for it (falls to OTHER)
-- [ ] **`history_replay.py` and `tg_listener.py` have duplicate code** — `extract_favorite_odds()` is duplicated in both files
+- [ ] **Playwright selectors are best-guess** — may need adjustment after first live test (BACK odds buttons, stake input, etc.)
 - [ ] **No error handling for network failures** — scripts will crash on disconnect
 - [ ] **`.env` contains real credentials** — should use `.env.example` template for repo
+- [ ] **No DRY_RUN mode** — would be useful for testing without placing real bets
 
 ---
 
@@ -132,6 +164,7 @@ Date range: **2025-02-16 → 2026-02-05**
 | Package | Version | Purpose |
 |---------|---------|---------|
 | `telethon` | 1.42.0 | Telegram client library |
+| `playwright` | 1.58.0 | Browser automation |
 
 Virtual env: `.venv` (Python 3.10)
 
@@ -139,7 +172,12 @@ Virtual env: `.venv` (Python 3.10)
 
 ## How to Run
 
-### Live real-time monitoring (recommended)
+### Live monitoring + automated betting
+```bash
+.venv\Scripts\python.exe live_monitor.py
+```
+
+### Live Telegram listener only (no betting)
 ```bash
 .venv\Scripts\python.exe tg_listener.py
 ```

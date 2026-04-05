@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**reddy_set_go** is a Telegram channel monitoring & history analysis tool for cricket/sports betting tips channels. It replays past messages or listens live in real-time, parses them using a custom message classifier, and prints a structured match-by-match event timeline to the console.
+**reddy_set_go** is a Telegram channel monitoring & automated betting tool for cricket/sports betting tips channels. It replays past messages or listens live in real-time, parses them using a custom message classifier, and automatically places bets on Reddybook via Playwright browser automation.
 
 ---
 
@@ -11,7 +11,10 @@
 ```
 D:\reddy_set_go\
 ├── history_replay.py        # Offline replay engine — iterates past messages
-├── tg_listener.py           # Live real-time listener — monitors new messages
+├── tg_listener.py           # Live Telegram listener (monitor only, no betting)
+├── live_monitor.py          # Live Telegram listener + Reddybook auto-betting
+├── bet_action.py            # Playwright browser automation (login, find match, place bet, cashout)
+├── state.py                 # Match state tracker + stake calculator
 ├── config.py                # Env-based config loader (reads .env)
 ├── .env                     # Secrets & channel config (gitignored)
 ├── parser.py                # Message classifier + odds/team extractor
@@ -29,7 +32,10 @@ D:\reddy_set_go\
 ## Entrypoints
 
 ```bash
-# Live real-time monitoring (recommended)
+# Live monitoring + automated betting (recommended)
+.venv\Scripts\python.exe live_monitor.py
+
+# Live Telegram listener only (no betting)
 .venv\Scripts\python.exe tg_listener.py
 
 # Offline history replay
@@ -54,6 +60,14 @@ D:\reddy_set_go\
 | `TARGET_CHAT_ID`     | `int`      | Channel ID (e.g. `-1003898959289`)               |
 | `TARGET_CHAT_USERNAME` | `str`    | (Optional) Channel @username                     |
 | `TARGET_INVITE_HASH` | `str`      | (Optional) Invite link hash for auto-join        |
+| `SITE_URL`           | `str`      | Betting site URL (e.g. `https://reddybook.live/home`) |
+| `SITE_USERNAME`      | `str`      | Betting site username                            |
+| `SITE_PASSWORD`      | `str`      | Betting site password                            |
+| `HEADLESS`           | `bool`     | Browser visibility (`False` = visible window)    |
+| `MATCH_LIMIT_PCT`    | `float`    | % of balance per match limit (default: `5`)      |
+| `FIRST_ENTRY_PCT`    | `float`    | % of limit for first entry (default: `40`)       |
+| `JACKPOT_PCT`        | `float`    | % of limit for jackpot entry (default: `60`)     |
+| `ODDS_DRIFT_ABORT`   | `float`    | Abort bet if odds drift > this % (default: `15`) |
 
 Config is loaded by `config.py` from `.env` — no hardcoded secrets.
 
@@ -97,21 +111,41 @@ Config is loaded by `config.py` from `.env` — no hardcoded secrets.
 
 ---
 
-## Match Lifecycle
+## Match Lifecycle (with betting)
 
 ```
-MATCH_SETUP        ← opens a match block, prints header
-  └── SIGNAL_FIRST_ENTRY    ← printed as [FIRST ENTRY #1]
-  └── SIGNAL_FIRST_ENTRY    ← printed as [FIRST ENTRY #2] (if odds improved)
-  └── SIGNAL_JACKPOT_ENTRY  ← printed as [JACKPOT ENTRY]
-  └── SIGNAL_CASHOUT_BOOK   ← printed as [CASHOUT], closes block
-  └── WIN_POST              ← printed as [WIN POST], closes block
-  └── LOSS_POST             ← printed as [LOSS POST]
-  └── SIGNAL_LOSS_CUT       ← printed as [LOSS_CUT], closes block
-  └── MATCH_CANCELLED       ← printed as [CANCELLED], closes block
+MATCH_SETUP        ← fetch balance, calc stake, find match on site
+  └── SIGNAL_FIRST_ENTRY    ← place back bet (40% of match limit)
+  └── SIGNAL_JACKPOT_ENTRY  ← place second back bet (60% of match limit)
+  └── SIGNAL_CASHOUT_BOOK   ← click CASHOUT, accept pre-filled amount, close
+  └── WIN_POST              ← log win, close match
+  └── LOSS_POST             ← log loss, close match
+  └── SIGNAL_LOSS_CUT       ← click LOSS CUT, accept pre-filled amount, close
+  └── MATCH_CANCELLED       ← log cancel, close match
 ```
 
 A new `MATCH_SETUP` before a close auto-closes the previous block as `UNCLOSED`.
+
+---
+
+## Stake Calculation
+
+- **Match limit** = `balance * MATCH_LIMIT_PCT%` (default: 5%)
+- **First entry** = `match_limit * FIRST_ENTRY_PCT%` (default: 40%)
+- **Jackpot entry** = `match_limit * JACKPOT_PCT%` (default: 60%)
+- **Single entry only** = first entry stake (40% used)
+- Stake rounded to nearest ₹100, minimum ₹100
+
+Example: Balance ₹10,000 → Limit ₹500 → First ₹200, Jackpot ₹300
+
+---
+
+## Odds Conversion
+
+Channel sends Indian format: `46p` → Decimal: `1.46`
+Formula: `decimal = 1 + p/100`
+
+Drift check: abort if live odds drop >15% below signal odds.
 
 ---
 
@@ -173,9 +207,10 @@ Extracted: `odds = "90p"`, `team = "CHENNAI"` (team to fade/lay)
 
 ```
 telethon==1.42.0
+playwright==1.58.0
 ```
 
-Install: `pip install telethon`
+Install: `pip install telethon playwright && playwright install chromium`
 
 Virtual env: `.venv` (activate before running)
 
@@ -183,8 +218,9 @@ Virtual env: `.venv` (activate before running)
 
 ## Notes
 
-- The **bet side is always the opposing team** — entry signal says `"90p CHENNAI KARO"` but the predicted winner is `BANGLORE`, meaning: lay Chennai / back Bangalore.
-- Cashout signals (`"NNp TEAM BOOKSET KARO"`) close the match early — profit already locked.
+- The **bet side is always the predicted winner** — entry signal says `"90p CHENNAI KARO"` but we BACK Bangalore.
+- Cashout/Loss Cut buttons open a pre-filled bet panel — amount is auto-calculated by site, we just click "PLACE BET".
+- Bet placement retries indefinitely on "odds changed" errors, aborts only if odds drift >15%.
 - Parser uses line-by-line processing for clean team name extraction (regex preserves newlines).
-- `tg_listener.py` logs every message with timestamp, ID, parsed type, and action taken.
+- `live_monitor.py` runs both Telethon listener and Playwright browser simultaneously.
 - `history_replay.py` date range is configurable via `START_UTC` / `END_UTC` constants.
